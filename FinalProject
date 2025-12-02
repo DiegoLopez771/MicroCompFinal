@@ -1,0 +1,11 @@
+/*
+OBJECTIVES: 
+1. Reads LM35 temperature sensor and displays it to I2C LCD
+2. If temperature is above threshold, activates fan to cool down 
+3. If temperature is hot, stays awake and monitors continuously
+4. If temperature is cool, updates display then enters sleep mode with WDT
+5. Updates LED color based on temperature thresholds 
+6. Converts temperature to Fahrenheit and Celsius
+7. Uses watchdog timer for 16 second intervals in sleep mode
+8. Controls a motor/fan based on temperature readings
+*/
