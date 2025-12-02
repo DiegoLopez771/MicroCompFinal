@@ -1,3 +1,4 @@
+//Final Test
 /*
 OBJECTIVES: 
 1. Reads LM35 temperature sensor and displays it to I2C LCD
@@ -9,3 +10,286 @@ OBJECTIVES:
 7. Uses watchdog timer for 16 second intervals in sleep mode
 8. Controls a motor/fan based on temperature readings
 */
+#include <xc.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <pic16f1829.h>
+#include "i2c.h"
+#include "i2cLCD.h" 
+#include <stdbool.h>
+
+// === Configuration Bits ===
+#pragma config FOSC = INTOSC    
+#pragma config WDTE = SWDTEN    // WDT controlled by software
+#pragma config PWRTE = OFF      
+#pragma config MCLRE = ON       
+#pragma config CP = OFF         
+#pragma config CPD = OFF        
+#pragma config BOREN = ON       
+#pragma config CLKOUTEN = OFF   
+#pragma config IESO = OFF       
+#pragma config FCMEN = OFF      
+
+#pragma config WRT = OFF        
+#pragma config PLLEN = OFF      
+#pragma config STVREN = ON      
+#pragma config BORV = LO        
+#pragma config LVP = ON         
+
+// === TIMING CONSTANTS ========================================================================================================================
+#define WDT_16seconds   0x1D // WDT prescaler for ~16s
+#define WDT_8seconds    0x1C // WDT prescaler for ~8s
+#define WDT_4seconds    0x1B // WDT prescaler for ~4s
+
+// === I2C COMMUNICATION ========================================================================================================================
+#define I2C_SLAVE       0x27        
+#define _XTAL_FREQ      4000000UL   
+#define DEGREE_CHAR     0xDF  
+
+// === LED ========================================================================================================================
+#define LED_RED_MASK             0x10 // RB4
+#define LED_GREEN_MASK           0x20 // RB5
+#define LED_BOTH_MASK            (LED_RED_MASK | LED_GREEN_MASK)
+bool SLEEP_MODE = false;      // Global sleep mode flag
+
+// === TEMP SENSOR ===========================================================================================================================
+#define TEMP_SENSOR_ANALOG_CHANNEL 	1    // RA1 is AN1
+#define TEMP_SENSOR_TRIS_MASK    	0x02 // RA1 is Bit 1 (0b000000010)
+
+// === TIMING CONSTANTS ========================================================================================================================
+#define WDT_16seconds   0x1D // WDT prescaler for ~16s
+#define WDT_8seconds    0x1C // WDT prescaler for ~8s
+#define WDT_4seconds    0x1B // WDT prescaler for ~4s
+
+// === TIMING CONSTANTS ========================================================================================================================
+#define FAN_FLAG 0x04 // RA2
+
+// === TEMP THRESHOLDS (RAW ADC VALUES) ========================================================================================================================
+#define R_HOT             69  // Corresponds to ~30.0C (Blink Red, Fan Threshold)
+#define R_SLEEP_THRESHOLD 58  // If temp is below this, device goes to sleep.
+
+// === Global State Variable ========================================================================================================================
+bool ledBlinkState = false; 
+
+// ===== Function Declarations ========================================================================================================================
+void lcd_init_wrapper(void);
+void lcd_clear_wrapper(void);
+void lcd_gotoxy(uint8_t x, uint8_t y);			//LCD functions
+void lcd_puts_wrapper(const char *s);
+void lcd_Clear_Display(int address);
+void display_temperature(unsigned int rawTemp);
+
+void update_fan(unsigned int rawTemp); 			//Fan activation
+
+void update_led_awake(unsigned int rawTemp);		//WDT Logic
+void update_led_sleep_mode(unsigned int rawTemp);
+
+void configure_wdt(void);				//WDT setup
+void disable_wdt(void);
+
+void adc_init(void);					//ADC config
+unsigned int adc_read(unsigned char channel);
+
+void main(){
+	// ===== CLOCK (4 MHz) =====
+    OSCCON = 0x68; 
+
+    // ===== I/O & PIN SETUP =====
+    // ANSELA: Set RA1 (AN1) for analog input. All others 0 (digital).
+    ANSELA = TEMP_SENSOR_TRIS_MASK; 
+    ANSELB = 0x00; 
+    ANSELC = 0x00;
+    
+    // TRISA: RA2 (FAN) output, RA1 (Temp Sensor) input
+    TRISA &= ~(FAN_FLAG);           // RA2 (FAN) output
+    TRISA |= TEMP_SENSOR_TRIS_MASK; // RA1 (Temp Sensor) input
+    TRISB &= ~(LED_BOTH_MASK);      // RB4/RB5 (LEDs) outputs
+    TRISC = 0x00;         
+    
+    LATB = 0x00; // Start with LEDs OFF
+    LATA = 0x00; // Start with FAN OFF
+    LATC = 0x00;
+
+    // Initialize ADC for LM35 on AN4/RA5
+    adc_init();
+    
+    // ===== LCD INIT =====
+    i2c_Init();
+    lcd_init_wrapper();
+    lcd_clear_wrapper();
+    lcd_gotoxy(0,0);
+    lcd_puts_wrapper("T-Sensor Active");
+    __delay_ms(3000);
+    lcd_clear_wrapper();
+    
+    // Clear WDT before starting
+    CLRWDT();
+    
+    unsigned int currentRawTemp;
+
+    while (1) {
+        // Read temperature sensor
+        unsigned long sum = 0;
+        const int samples = 16;
+        for(int i = 0; i < samples; i++) {
+            sum += adc_read(TEMP_SENSOR_ANALOG_CHANNEL);
+            __delay_ms(10); // Small delay between samples
+        }
+        currentRawTemp = sum / samples; // Average reading
+        sum = 0;
+        
+        // Update fan based on temperature
+        update_fan(currentRawTemp);
+        
+        if (currentRawTemp >= R_SLEEP_THRESHOLD) {
+            // Awake Mode
+            SLEEP_MODE = false;
+            update_led_awake(currentRawTemp);
+            display_temperature(currentRawTemp);
+        } else {
+            // Sleep Mode Prep
+            display_temperature(currentRawTemp);
+            update_led_sleep_mode(currentRawTemp);
+            __delay_ms(5000); // Allow time for user to see display
+
+            //Turn off peripherals before sleeping
+            LATB &= ~(LED_BOTH_MASK); 
+            LATA &= ~(FAN_FLAG); 
+            lcd_Clear_Display(I2C_SLAVE); 
+            lcd_gotoxy(0,1);
+            lcd_puts_wrapper("Sleep...          ");
+
+            //Enter WDT-Controlled Sleep
+            configure_wdt();
+            CLRWDT();         // Clear WDT before sleeping
+            SLEEP();         // Enter sleep mode
+            
+            //Wake up sequence
+            disable_wdt();
+            PTR1 &= 0xF7; // Clear WDT flag
+        }
+    }
+}
+
+
+// === LCD FUNCTIONS ========================================================================================================================
+//Writes to screen
+void lcd_init_wrapper(void) {
+    I2C_LCD_Init(I2C_SLAVE);
+}
+
+//Clears top text
+void lcd_clear_wrapper(void) {
+    I2C_LCD_Command(I2C_SLAVE, 0x01); 
+    __delay_ms(2);
+}
+//Sets coordinate for text
+void lcd_gotoxy(uint8_t x, uint8_t y) {
+    unsigned char addr = (y == 0) ? (0x80 + x) : (0xC0 + x);
+    I2C_LCD_Pos(I2C_SLAVE, addr);
+}
+
+//Sends wrapper to I2C screen
+void lcd_puts_wrapper(const char *s) {
+    unsigned char buf[16];
+    uint8_t n = 0;
+
+    while (s[n] && n < 16)
+    {
+        buf[n] = s[n];
+        n++;
+    }
+
+    if (n > 0)
+        I2C_LCD_SWrite(I2C_SLAVE, buf, n);
+}
+
+//Clears LCD screen
+void lcd_Clear_Display(int SlaveAddress) {
+    I2C_LCD_Command(SlaveAddress, 0x01);
+    __delay_ms(2);   // mandatory delay for clear command
+}
+
+// ==== FAN LOGIC IMPLEMENTATION ======================================================================================================
+void update_fan(unsigned int raw) {
+    if (raw >= R_HOT) { // Turn ON at Max Hot Threshold
+        LATA |= FAN_FLAG;       
+    }
+    else if (raw < R_SLEEP_THRESHOLD) { // Turn OFF below Hot Threshold
+        LATA &= ~(FAN_FLAG);  
+    }
+}
+// === WDT LOGIC ==========================================================================================================================================
+void update_led_awake(unsigned int raw) {
+    
+    #define SET_RED()    LATB |= LED_RED_MASK; LATB &= ~(LED_GREEN_MASK)
+    #define SET_GREEN()  LATB |= LED_GREEN_MASK; LATB &= ~(LED_RED_MASK)
+    #define SET_ORANGE() LATB |= LED_BOTH_MASK
+    #define SET_OFF()    LATB &= ~(LED_BOTH_MASK)
+    
+    if (raw >= R_HOT) {
+        // 🔴 Solid red (Very Hot)
+        SET_RED();
+        
+    }
+    else if (raw < R_SLEEP_THRESHOLD) {
+        // 🟠 Blink orange (Warm)
+        if (ledBlinkState) {
+            SET_ORANGE(); 
+        } else {
+            SET_OFF();
+        }
+    }
+    else {
+        // 🟢 Solid green (Cool/Normal)
+        SET_GREEN();
+    }
+}
+
+void update_led_sleep_mode(unsigned int raw) {
+    // Show solid green before entering sleep mode
+    SET_GREEN();
+}
+
+// === WDT SETUP ==========================================================================================================================================
+void configure_wdt(void) {
+    WDTCON = WDT_16seconds;   // Set prescaler bits for ~16 second timeout
+    WDTCONbits.SWDTEN = 1;   // Enable WDT
+}
+
+void disable_wdt(void) {
+    WDTCONbits.SWDTEN = 0;   // Disable WDT
+}
+
+// === ADC CONFIG ==========================================================================================================================================
+void adc_init(void)
+{
+    // Configure RA1 as analog input and TRIS set as input
+    ANSELA |= TEMP_SENSOR_TRIS_MASK; 
+    TRISA  |= TEMP_SENSOR_TRIS_MASK; 
+
+    // ADC: right-justified, Vref = Vdd, Fosc/32
+    // ADCON1: ADFM=1 (Right Justified), VCFG=00 (Vref = Vdd), ADCS=000 (Fosc/32) -> 0x80
+    ADCON1 = 0x80;        
+    
+    // ADCON0: Setup channel. We start with Channel 0.
+    ADCON0 = 0x00;        
+    ADCON0bits.ADON = 1; // Turn ADC ON
+}
+
+unsigned int adc_read(unsigned char channel)
+{
+    // clear CHS bits (CHS4:CHS0 = bits 6..2)
+    ADCON0 &= 0xC3;                   // Mask: 1100 0011 (Clears channel selection bits)
+    ADCON0 |= (channel << 2);         // Set channel (e.g., 1 for AN1/RA1)
+
+    // Wait for the Sample-and-Hold capacitor to acquire the signal
+    // Your ADCON2 settings (if using ADCON2, otherwise delay is mandatory) or this explicit delay ensures acquisition time is met.
+    __delay_us(10);                   
+
+    GO_nDONE = 1;                     // Start conversion
+    while (GO_nDONE);                 // Wait for conversion to complete
+
+    // Return the 10-bit result (ADRESH:ADRESL)
+    return ((unsigned int)ADRESH << 8) | ADRESL;
+}
