@@ -66,7 +66,7 @@ bool SLEEP_MODE = false;      // Global sleep mode flag
 
 // === TEMP THRESHOLDS (RAW ADC VALUES) ========================================================================================================================
 #define R_HOT             64  // Corresponds to ~30.0C (Blink Red, Fan Threshold)
-#define R_SLEEP_THRESHOLD 582  // If temp is below this, device goes to sleep.
+#define R_SLEEP_THRESHOLD 58  // If temp is below this, device goes to sleep.
 
 // === Global State Variable ===================================================================================================================================
 bool ledBlinkState = false; 
