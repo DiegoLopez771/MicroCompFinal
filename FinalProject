@@ -76,7 +76,7 @@ void lcd_init_wrapper(void);
 void lcd_clear_wrapper(void);
 void lcd_gotoxy(uint8_t x, uint8_t y);			//LCD functions
 void lcd_puts_wrapper(const char *s);
-void lcd_Clear_Display(int address);
+void lcd_clear_display(void);
 void display_temperature(unsigned int rawTemp);
 
 void update_fan(unsigned int rawTemp); 			//Fan activation
@@ -155,7 +155,7 @@ void main(){
             //Turn off peripherals before sleeping
             LATB &= ~(LED_BOTH_MASK); 
             LATA &= ~(FAN_FLAG); 
-            lcd_Clear_Display(I2C_SLAVE); 
+            lcd_clear_display(); 
             lcd_gotoxy(0,1);
             lcd_puts_wrapper("Sleep...          ");
 
@@ -205,8 +205,8 @@ void lcd_puts_wrapper(const char *s) {
 }
 
 //Clears LCD screen
-void lcd_Clear_Display(int SlaveAddress) {
-    I2C_LCD_Command(SlaveAddress, 0x01);
+void lcd_clear_display() {
+    I2C_LCD_Command(I2C_SLAVE, 0x01);
     __delay_ms(2);   // mandatory delay for clear command
 }
 
